@@ -69,6 +69,8 @@ class SystemConfig:
     enable_async: bool = True  # 是否启用异步处理
     max_concurrent_tasks: int = 5  # 最大并发任务数
     checkpoint_interval: int = 10  # 检查点间隔（秒）
+    max_concurrent_api: int = 10  # API限流-最大并发
+    min_api_interval_seconds: float = 0.0  # API限流-最小调用间隔
 
 
 @dataclass  

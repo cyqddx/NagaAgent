@@ -488,7 +488,6 @@ async def run_full_flow_test(user_question: str):
             "log_file": str(test_logger.log_file),
             "report_file": str(test_logger.result_file)
         }
-                
     except Exception as e:
         test_logger.log_error(e, "全流程执行")
         test_logger.finalize_test(False)

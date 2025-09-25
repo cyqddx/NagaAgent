@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from ..models.data_models import Agent, Task
 from ..models.config import GameConfig
 from .actor import ActorOutput
+from ..utils.api_pool import get_api_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,8 @@ class GameCriticizer:
     async def _call_llm_for_critique(self, prompt: str) -> str:
         if self.naga_conversation is None:
             raise RuntimeError("LLM不可用，无法执行批判")
-        return await self.naga_conversation.get_response(prompt, temperature=0.4)
+        limiter = get_api_limiter()
+        return await limiter.call(self.naga_conversation.get_response, prompt, temperature=0.4)
 
     def _parse_llm_json(self, text: str, has_previous: bool) -> tuple:
         import json, re
