@@ -46,8 +46,8 @@ class GameActor:
         """初始化 NagaAgent API 连接(若未提供则尝试创建)"""
         if self.naga_conversation is None:
             try:
-                from system.conversation_core import NagaConversation
-                self.naga_conversation = NagaConversation()
+                from apiserver.llm_service import get_llm_service
+                self.naga_conversation = get_llm_service()
                 logger.info("GameActor 成功初始化 NagaAgent API 连接")
             except Exception as e:
                 logger.warning(f"GameActor 无法初始化 NagaAgent API, 将使用降级模式: {e}")
