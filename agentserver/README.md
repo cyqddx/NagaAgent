@@ -94,7 +94,7 @@ uvicorn agentserver.agent_server:app --host 0.0.0.0 --port 8001
 主对话流程通过HTTP客户端调用Agent Server：
 
 ```python
-# 在conversation_core.py中
+# 在apiserver/api_server.py中
 async def _call_agent_server_analyze(self, messages, session_id):
     url = "http://localhost:8001/analyze_and_plan"
     payload = {"messages": messages, "session_id": session_id}
@@ -121,3 +121,7 @@ async def _call_agent_server_analyze(self, messages, session_id):
 2. **网络延迟**：HTTP调用会增加少量延迟
 3. **错误处理**：需要处理网络异常和服务不可用情况
 4. **资源管理**：需要合理配置任务并发数和超时时间
+
+## 更新记录
+
+- 2025-09-30: 修复导入路径，将 `apiserver.task_scheduler` 更正为 `agentserver.task_scheduler`（影响 `core/agent_manager.py` 与 `core/multi_agent_coordinator.py`），避免导入解析失败。

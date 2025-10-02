@@ -6,6 +6,7 @@ MCP服务器 - 独立的MCP工具调度服务
 """
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -33,8 +34,6 @@ async def lifespan(app: FastAPI):
     # startup
     logger.info("MCP服务器启动中...")
     
-    # （可选）能力管理器已移除，如需能力信息请从注册中心读取
-    Modules.capability_manager = None
     
     # 初始化MCP管理器（用于工具调用执行）
     try:
@@ -46,7 +45,7 @@ async def lifespan(app: FastAPI):
         Modules.mcp_manager = None
     
     # 初始化调度器（注入mcp_manager）
-    Modules.scheduler = MCPScheduler(None, Modules.mcp_manager)
+    Modules.scheduler = MCPScheduler(Modules.mcp_manager)
     
     logger.info("MCP服务器启动完成")
     
@@ -69,7 +68,6 @@ app = FastAPI(
 class Modules:
     """全局模块管理"""
     scheduler: Optional[MCPScheduler] = None
-    capability_manager: Optional[Any] = None
     # 任务注册表
     task_registry: Dict[str, Dict[str, Any]] = {}
     # 幂等性缓存
@@ -95,6 +93,7 @@ async def schedule_mcp_task(payload: Dict[str, Any]):
         tool_calls = payload.get("tool_calls", [])
         session_id = payload.get("session_id")
         request_id = payload.get("request_id", str(uuid.uuid4()))
+        callback_url = payload.get("callback_url")
         
         if not query and not tool_calls:
             raise HTTPException(400, "query或tool_calls不能同时为空")
@@ -131,6 +130,7 @@ async def schedule_mcp_task(payload: Dict[str, Any]):
             "tool_calls": tool_calls,
             "session_id": session_id,
             "request_id": request_id,
+            "callback_url": callback_url,
             "status": "queued",
             "created_at": _now_iso(),
             "result": None,
@@ -229,25 +229,58 @@ async def cancel_task(task_id: str):
     
     return {"success": True, "message": "任务已取消"}
 
-@app.get("/capabilities")
-async def get_capabilities():
-    """获取MCP能力列表"""
-    if not Modules.capability_manager:
-        raise HTTPException(500, "能力管理器未初始化")
-    
-    capabilities = await Modules.capability_manager.get_capabilities()
-    return {"capabilities": capabilities}
-
 # 已移除流式处理相关端点，统一通过 /schedule 进入调度流程
 
-@app.post("/capabilities/refresh")
-async def refresh_capabilities():
-    """刷新MCP能力"""
-    if not Modules.capability_manager:
-        raise HTTPException(500, "能力管理器未初始化")
-    
-    await Modules.capability_manager.refresh_capabilities()
-    return {"success": True, "message": "能力已刷新"}
+@app.post("/tool_result_callback")
+async def tool_result_callback(payload: Dict[str, Any]):
+    """接收工具执行结果回调，使用主提示词拼接并流式返回"""
+    try:
+        session_id = payload.get("session_id")
+        task_id = payload.get("task_id")
+        result = payload.get("result", {})
+        success = payload.get("success", False)
+        
+        if not session_id:
+            raise HTTPException(400, "缺少session_id")
+        
+        # 构建主提示词和消息
+        from system.config import get_prompt
+        from system.config import config, AI_NAME
+        from apiserver.message_manager import message_manager
+        
+        system_prompt = get_prompt("naga_system_prompt", ai_name=AI_NAME)
+        current_message = f"工具执行结果：{json.dumps(result, ensure_ascii=False)}"
+        
+        # 构建对话消息
+        messages = message_manager.build_conversation_messages(
+            session_id=session_id,
+            system_prompt=system_prompt,
+            current_message=current_message
+        )
+        
+        # 直接调用LLM服务进行总结
+        try:
+            from apiserver.llm_service import get_llm_service
+            llm_service = get_llm_service()
+            response_text = await llm_service.get_response(current_message, temperature=0.7)
+        except Exception as e:
+            logger.error(f"调用LLM服务失败: {e}")
+            response_text = f"处理工具结果时出错: {str(e)}"
+        
+        # 保存到历史
+        message_manager.add_message(session_id, "user", current_message)
+        message_manager.add_message(session_id, "assistant", response_text)
+        
+        return {
+            "success": True,
+            "message": "工具结果已处理并流式返回",
+            "response": response_text,
+            "task_id": task_id
+        }
+        
+    except Exception as e:
+        logger.error(f"工具结果回调处理失败: {e}")
+        raise HTTPException(500, f"处理失败: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
