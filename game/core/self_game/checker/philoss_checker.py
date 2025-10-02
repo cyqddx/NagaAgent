@@ -13,11 +13,63 @@ PhilossChecker - 创新性评估组件
 
 import asyncio
 import logging
+import os
+import random
 import time
 import re
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
-import numpy as np
+
+
+def _build_numpy_stub():
+    class _RandomStub:
+        @staticmethod
+        def seed(value: int):
+            random.seed(value)
+
+        @staticmethod
+        def normal(loc: float, scale: float, size: int):
+            return [random.gauss(loc, scale) for _ in range(size)]
+
+    class _LinalgStub:
+        @staticmethod
+        def norm(vector):
+            return sum(x * x for x in vector) ** 0.5
+
+    class _NumpyStub:
+        random = _RandomStub()
+        linalg = _LinalgStub()
+
+        @staticmethod
+        def array(data):
+            return list(data)
+
+        @staticmethod
+        def dot(a, b):
+            return sum(x * y for x, y in zip(a, b))
+
+        @staticmethod
+        def mean(values):
+            return sum(values) / len(values) if values else 0.0
+
+        @staticmethod
+        def std(values):
+            if len(values) < 2:
+                return 0.0
+            mean = _NumpyStub.mean(values)
+            variance = sum((x - mean) ** 2 for x in values) / len(values)
+            return variance ** 0.5
+
+    return _NumpyStub()
+
+
+if os.environ.get('NAGA_FORCE_NUMPY_STUB', '1') == '1':
+    np = _build_numpy_stub()
+else:  # pragma: no cover - 环境允许时仍可使用真实numpy
+    try:
+        import numpy as np  # type: ignore
+    except Exception:  # pragma: no cover
+        np = _build_numpy_stub()
 
 from ...models.data_models import HiddenState, TextBlock, NoveltyScore
 from ...models.config import GameConfig

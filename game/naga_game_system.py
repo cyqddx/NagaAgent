@@ -328,6 +328,8 @@ class NagaGameSystem:
                 # 临时使用领域特定配置
                 temp_role_generator = RoleGenerator(domain_config, self.naga_conversation)
                 agents = await temp_role_generator.generate_agents(task, expected_agent_count)
+                # 同步导出路径以便外部记录
+                self.role_generator.last_prompt_export_path = temp_role_generator.last_prompt_export_path
             else:
                 agents = await self.role_generator.generate_agents(task, expected_agent_count)
             

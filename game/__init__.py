@@ -1,8 +1,6 @@
-"""
-NagaAgent Game - 多智能体博弈系统
+"""NagaAgent Game - 多智能体博弈系统"""
 
-专注于通过结构化协作和基于Philoss的创新性评估来解决LLM在多智能体协作中的问题
-"""
+from importlib import import_module
 
 from .core.models.data_models import (
     Agent,
@@ -23,18 +21,19 @@ from .core.interaction_graph.dynamic_dispatcher import DynamicDispatcher
 from .core.interaction_graph.distributor import Distributor
 from .core.interaction_graph.prompt_generator import PromptGenerator
 
-from .core.self_game.actor import GameActor
-from .core.self_game.criticizer import GameCriticizer  
-from .core.self_game.checker.philoss_checker import PhilossChecker
-from .core.self_game.game_engine import GameEngine
-
 from .naga_game_system import NagaGameSystem
 
 __version__ = "1.0.0"
 __author__ = "NagaAgent Team"
 
+_LAZY_IMPORTS = {
+    'GameActor': 'game.core.self_game.actor:GameActor',
+    'GameCriticizer': 'game.core.self_game.criticizer:GameCriticizer',
+    'PhilossChecker': 'game.core.self_game.checker.philoss_checker:PhilossChecker',
+    'GameEngine': 'game.core.self_game.game_engine:GameEngine',
+}
+
 __all__ = [
-    # Data Models
     'Agent',
     'InteractionGraph', 
     'GameResult',
@@ -45,25 +44,24 @@ __all__ = [
     'RoleGenerationRequest', 
     'PromptTemplate',
     'ThinkingVector',
-    
-    # Interaction Graph Components
     'RoleGenerator',
     'SignalRouter', 
     'DynamicDispatcher',
     'Distributor',
     'PromptGenerator',
-    
-    # Self Game Components
     'GameActor',
     'GameCriticizer',
     'PhilossChecker',
     'GameEngine',
-    
-    # Main System
     'NagaGameSystem',
-] 
- 
- 
- 
- 
- 
+]
+
+
+def __getattr__(name):
+    if name in _LAZY_IMPORTS:
+        module_path, attr = _LAZY_IMPORTS[name].split(":")
+        module = import_module(module_path)
+        value = getattr(module, attr)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module 'game' has no attribute '{name}'")

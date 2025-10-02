@@ -32,7 +32,8 @@ class PromptGenerator:
         if not self.naga_conversation:
             return self._get_fallback_prompt(role, task, connections)
         
-        prompt_request = self._build_prompt_generation_request(role, task, connections)
+        team_overview = self._build_team_overview(all_roles, role.name)
+        prompt_request = self._build_prompt_generation_request(role, task, connections, team_overview)
         try:
             generated = await self.naga_conversation.get_response(
                 prompt_request,
@@ -45,9 +46,16 @@ class PromptGenerator:
             logger.warning(f"LLM提示词生成失败,使用备用: {e}")
             return self._get_fallback_prompt(role, task, connections)
     
-    def _build_prompt_generation_request(self, role: GeneratedRole, task: Task, connections: List[str]) -> str:
+    def _build_prompt_generation_request(
+        self,
+        role: GeneratedRole,
+        task: Task,
+        connections: List[str],
+        team_overview: str
+    ) -> str:
         """构建提示词生成请求"""
         conn_text = ", ".join(connections) if connections else "无"
+        team_section = f"\n## 团队协作背景\n{team_overview}\n" if team_overview else "\n"
         return f"""# 任务: 为专业角色生成系统提示词
 
 ## 角色信息
@@ -64,12 +72,27 @@ class PromptGenerator:
 
 ## 协作环境
 - 可协作对象: {conn_text}
-- 团队: 多智能体协作
+- 团队: 多智能体协作{team_section}
 
 ## 生成要求
 请直接输出可作为system prompt使用的内容,包含: 身份定位/职责/协作方式/输出要求/风格与边界.
 不需要任何额外说明或JSON标记,仅输出提示词正文.
 """
+
+    def _build_team_overview(self, roles: List[GeneratedRole], current_role_name: str) -> str:
+        """为提示词提供团队摘要，消除冗余参数"""
+        if not roles:
+            return ""
+
+        lines: List[str] = []
+        for role in roles:
+            if role.name == current_role_name:
+                continue
+            summary = f"- {role.name}（{role.role_type}）"
+            if role.responsibilities:
+                summary += f"\n  职责焦点: {', '.join(role.responsibilities[:2])}"
+            lines.append(summary)
+        return "\n".join(lines)
     
     def _extract_system_prompt(self, generated_content: str, role: GeneratedRole) -> str:
         content = generated_content.strip()

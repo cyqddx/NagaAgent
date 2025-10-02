@@ -17,17 +17,20 @@ logger = logging.getLogger(__name__)
 class Distributor:
     """角色分配器 - 通过大模型API生成角色"""
     
-    def __init__(self, config: GameConfig, naga_conversation=None):
+    def __init__(self, config: GameConfig, naga_conversation=None, auto_init_api: bool = False):
         """
         初始化Distributor
         
         Args:
             config: 游戏配置
             naga_conversation: NagaAgent的会话实例,用于API调用
+            auto_init_api: 是否尝试自动初始化NagaAgent会话
         """
         self.config = config
         self.naga_conversation = naga_conversation
-        self._init_naga_api()
+        self.auto_init_api = auto_init_api
+        if self.auto_init_api and self.naga_conversation is None:
+            self._init_naga_api()
     
     def _init_naga_api(self):
         """初始化NagaAgent API连接"""
@@ -54,7 +57,7 @@ class Distributor:
         """
         try:
             logger.info(f"开始生成任务角色:{task.description}")
-            
+
             # 创建角色生成请求
             request = RoleGenerationRequest(
                 task_description=task.description,
@@ -62,31 +65,28 @@ class Distributor:
                 expected_count_range=expected_count_range,
                 constraints=task.constraints
             )
-            
+
             # 生成角色生成提示词
             generation_prompt = self._build_role_generation_prompt(request)
-            
+
             # 调用大模型API
             response = await self._call_llm_api(generation_prompt)
-            
+
             # 解析生成结果
             roles = self._parse_roles_from_response(response)
-            
+
             # 纯验证
             validated_roles = self._validate_generated_roles(roles, request)
 
-            # 不强制补足到最小数量。仅当数量为0时，做最小回退，确保至少1个执行角色。
-            if len(validated_roles) == 0:
-                logger.warning("生成结果为空，进行最小回退生成1个执行角色")
-                fallback_roles = await self._fallback_generate_roles(task, (1, 1))
-                validated_roles.extend(fallback_roles)
+            if not validated_roles:
+                raise RuntimeError("角色生成失败: 大模型返回空结果")
 
             logger.info(f"成功生成{len(validated_roles)}个角色")
             return validated_roles
-            
+
         except Exception as e:
             logger.error(f"角色生成失败:{e}")
-            return await self._fallback_generate_roles(task, expected_count_range)
+            raise
     
     def _build_role_generation_prompt(self, request: RoleGenerationRequest) -> str:
         """构建角色生成的系统提示词"""
@@ -191,10 +191,10 @@ class Distributor:
         except json.JSONDecodeError as e:
             logger.error(f"JSON解析失败:{e}")
             logger.error(f"响应内容:{response}")
-            return []
+            raise RuntimeError("角色解析失败: 无法解析JSON") from e
         except Exception as e:
             logger.error(f"角色解析失败:{e}")
-            return []
+            raise
     
     def _validate_generated_roles(self, raw_roles: List[Dict[str, Any]], 
                                   request: RoleGenerationRequest) -> List[GeneratedRole]:
@@ -242,72 +242,6 @@ class Distributor:
         else:
             return []
     
-    async def _fallback_generate_roles(self, task: Task, expected_count_range: Tuple[int, int]) -> List[GeneratedRole]:
-        """动态回退生成(无任何固定枚举):
-        1) 二次LLM调用(更严格格式)
-        2) 若LLM不可用/失败: 基于任务文本生成通用执行角色(名称: 执行角色N),职责/技能从任务派生
-        """
-        min_count, max_count = expected_count_range
-        target_count = max(min_count, 1)
-
-        # 方案1: 再次尝试LLM(更严格)
-        if self.naga_conversation is not None:
-            strict_prompt = f"""# 任务: 智能体角色补全
-
-你需要为如下任务严格输出JSON,禁止任何额外文字.禁止出现"需求方"/"用户"/"客户".
-
-任务: {task.description}
-领域: {task.domain}
-数量: {target_count}
-
-JSON格式:
-{{"roles":[{{"name":"...","role_type":"...","responsibilities":["..."],"skills":["..."],"output_requirements":"...","priority_level":7}}]}}
-"""
-            try:
-                resp = await self.naga_conversation.get_response(strict_prompt, temperature=0.4)
-                roles = self._parse_roles_from_response(resp)
-                out: List[GeneratedRole] = []
-                for r in roles[:target_count]:
-                    try:
-                        out.append(GeneratedRole(
-                            name=str(r['name']).strip(),
-                            role_type=str(r['role_type']).strip(),
-                            responsibilities=self._ensure_list(r['responsibilities']),
-                            skills=self._ensure_list(r['skills']),
-                            output_requirements=str(r['output_requirements']).strip(),
-                            priority_level=int(r.get('priority_level', 5))
-                        ))
-                    except Exception:
-                        continue
-                if out:
-                    return out[:target_count]
-            except Exception as e:
-                logger.warning(f"严格回退LLM生成失败: {e}")
-        
-        # 方案2: 算法化占位(基于任务文本,非领域枚举)
-        def derive_phrases(text: str, n: int) -> List[str]:
-            text = (text or "").strip()
-            if not text:
-                return ["需求分析", "方案设计", "实施推进", "质量评估"][:n]
-            # 简单从文本切片构造短语
-            chunks = [text[i:i+4] for i in range(0, len(text), 4)]
-            base = [c for c in chunks if c.strip()]
-            base = base or ["需求分析", "方案设计", "实施推进", "质量评估"]
-            return (base + ["协作沟通", "风险管理"])[:n]
-        
-        roles_out: List[GeneratedRole] = []
-        for i in range(target_count):
-            resp = ["负责阶段性工作", "推动协作闭环", "保证交付质量"]
-            skills = derive_phrases(task.description, 4)
-            roles_out.append(GeneratedRole(
-                name=f"执行角色{i+1}",
-                role_type="执行者",
-                responsibilities=resp,
-                skills=skills,
-                output_requirements="本阶段结构化输出",
-                priority_level=max(1, 10 - i)
-            ))
-        return roles_out
     
     async def assign_collaboration_permissions(self, roles: List[GeneratedRole]) -> Dict[str, List[str]]:
         """
@@ -321,23 +255,22 @@ JSON格式:
         """
         try:
             logger.info(f"开始为{len(roles)}个角色分配协作权限")
-            
+
             # 构建权限分配提示词
             permission_prompt = self._build_permission_assignment_prompt(roles)
-            
+
             # 调用大模型API
             response = await self._call_llm_api(permission_prompt)
-            
+
             # 解析权限分配结果
             permissions = self._parse_permissions_from_response(response, roles)
-            
+
             logger.info("成功分配协作权限")
             return permissions
-            
+
         except Exception as e:
             logger.error(f"权限分配失败:{e}")
-            # 返回默认权限（全连通/按优先级相邻连通）
-            return self._get_default_permissions(roles)
+            raise
     
     def _build_permission_assignment_prompt(self, roles: List[GeneratedRole]) -> str:
         """构建权限分配提示词"""
@@ -404,30 +337,13 @@ JSON格式:
             
             if 'permissions' in data:
                 return data['permissions']
-            else:
-                logger.warning("权限响应中未找到'permissions'字段")
-                return self._get_default_permissions(roles)
-                
+            logger.error("权限响应中未找到'permissions'字段")
+            raise RuntimeError("权限解析失败: 缺少permissions字段")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"权限JSON解析失败:{e}")
+            raise RuntimeError("权限解析失败: 无法解析JSON") from e
         except Exception as e:
             logger.error(f"权限解析失败:{e}")
-            return self._get_default_permissions(roles)
+            raise
     
-    def _get_default_permissions(self, roles: List[GeneratedRole]) -> Dict[str, List[str]]:
-        """获取默认权限（基于优先级的简单规则）"""
-        permissions = {}
-        # 按优先级排序
-        sorted_roles = sorted(roles, key=lambda x: x.priority_level, reverse=True)
-        
-        for i, role in enumerate(sorted_roles):
-            connected_roles = []
-            if i == 0:
-                connected_roles = [r.name for r in sorted_roles[1:]]
-            elif i < len(sorted_roles) - 1:
-                connected_roles.append(sorted_roles[i-1].name)
-                connected_roles.append(sorted_roles[i+1].name)
-            else:
-                connected_roles.append(sorted_roles[0].name)
-            permissions[role.name] = list(dict.fromkeys(connected_roles))
-        
-        return permissions 
- 

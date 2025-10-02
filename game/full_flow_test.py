@@ -11,200 +11,25 @@ NagaAgent Game 全流程动态测试
 """
 
 import asyncio
-import logging
 import json
+import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List
-import os
+from typing import Any, Dict, List
 
 # 允许从 game 子目录直接执行本脚本时，正确导入顶层包 `game`
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-# 添加项目路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+PROJECT_ROOT = Path(CURRENT_DIR).parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # 导入系统组件
+from full_flow_logger import FullFlowTestLogger
 from game.naga_game_system import NagaGameSystem
 from game.core.models.config import GameConfig
 from game.core.models.data_models import Task
 from game.core.self_game.game_engine import GameEngine
-
-class FullFlowTestLogger:
-    """全流程测试日志记录器"""
-    
-    def __init__(self, test_name: str):
-        self.test_name = test_name
-        self.start_time = datetime.now()
-        
-        # 创建日志目录
-        self.log_dir = Path("logs/full_flow_test")
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 设置日志文件
-        timestamp = self.start_time.strftime("%Y%m%d_%H%M%S")
-        self.log_file = self.log_dir / f"test_{timestamp}.log"
-        self.result_file = self.log_dir / f"result_{timestamp}.md"
-        
-        # 配置日志
-        self.logger = logging.getLogger(f"FullFlowTest_{timestamp}")
-        self.logger.setLevel(logging.DEBUG)
-        
-        # 文件处理器
-        file_handler = logging.FileHandler(self.log_file, encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)
-        
-        # 控制台处理器
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        
-        # 格式化
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
-        
-        self.logger.addHandler(file_handler)
-        self.logger.addHandler(console_handler)
-        # 防止日志向上传播到root导致重复输出
-        self.logger.propagate = False
-        
-        # 测试数据收集
-        self.test_data = {
-            "test_name": test_name,
-            "start_time": self.start_time.isoformat(),
-            "user_question": None,
-            "inferred_domain": None,
-            "generated_agents": [],
-            "interaction_graph": None,
-            "game_rounds": [],
-            "final_result": None,
-            "execution_time": None,
-            "success": False,
-            "errors": [],
-            "pareto_front": []
-        }
-    
-    def log_step(self, step: str, data: Any = None):
-        """记录测试步骤"""
-        self.logger.info(f"🔄 步骤: {step}")
-        if data:
-            self.logger.debug(f"数据: {json.dumps(data, ensure_ascii=False, indent=2)}")
-    
-    def log_node_output(self, node_name: str, node_type: str, output: str):
-        """记录节点输出"""
-        self.logger.info(f"🤖 节点输出 [{node_type}] {node_name}:")
-        self.logger.info(f"📝 内容: {output}")
-        self.logger.debug(f"详细输出: {output}")
-    
-    def log_error(self, error: Exception, context: str = ""):
-        """记录错误"""
-        error_msg = f"❌ 错误 {context}: {str(error)}"
-        self.logger.error(error_msg)
-        self.test_data["errors"].append({
-            "context": context,
-            "error": str(error),
-            "timestamp": datetime.now().isoformat()
-        })
-    
-    def finalize_test(self, success: bool):
-        """完成测试并生成报告"""
-        end_time = datetime.now()
-        self.test_data["end_time"] = end_time.isoformat()
-        self.test_data["execution_time"] = (end_time - self.start_time).total_seconds()
-        self.test_data["success"] = success
-        
-        # 生成Markdown报告
-        self._generate_report()
-        
-        self.logger.info(f"📊 测试完成: {'成功' if success else '失败'}")
-        self.logger.info(f"⏱️  总耗时: {self.test_data['execution_time']:.2f}秒")
-        self.logger.info(f"📄 报告文件: {self.result_file}")
-    
-    def _generate_report(self):
-        """生成测试报告"""
-        report = f"""# NagaAgent Game 全流程测试报告
-
-## 测试概要
-- **测试名称**: {self.test_data['test_name']}
-- **开始时间**: {self.test_data['start_time']}
-- **结束时间**: {self.test_data.get('end_time', 'N/A')}
-- **执行时间**: {self.test_data.get('execution_time', 0):.2f}秒
-- **测试结果**: {'✅ 成功' if self.test_data['success'] else '❌ 失败'}
-
-## 用户输入
-**问题**: {self.test_data.get('user_question', 'N/A')}
-
-## 系统推理过程
-
-### 1. 领域推断
-**推断结果**: {self.test_data.get('inferred_domain', 'N/A')}
-
-### 2. 智能体生成
-**生成数量**: {len(self.test_data.get('generated_agents', []))}
-
-"""
-        
-        # 添加智能体详情
-        for i, agent in enumerate(self.test_data.get('generated_agents', []), 1):
-            if isinstance(agent, dict):
-                report += f"""#### 智能体 {i}: {agent.get('name', 'Unknown')}
-- **角色**: {agent.get('role', 'N/A')}
-- **是否需求方**: {'是' if agent.get('is_requester', False) else '否'}
-- **职责**: {', '.join(agent.get('responsibilities', [])[:3])}
-- **技能**: {', '.join(agent.get('skills', [])[:3])}
-- **连接权限**: {', '.join(agent.get('connection_permissions', []))}
-
-"""
-
-        # 添加博弈轮次
-        if self.test_data.get('game_rounds'):
-            report += "### 3. 博弈轮次\n\n"
-            for i, round_data in enumerate(self.test_data['game_rounds'], 1):
-                report += f"#### 轮次 {i}\n"
-                report += f"- **阶段**: {round_data.get('phase', 'N/A')}\n"
-                report += f"- **参与者**: {round_data.get('participants', 'N/A')}\n"
-                report += f"- **输出摘要**: {round_data.get('summary', 'N/A')[:200]}...\n\n"
-        
-        # 添加最终结果
-        report += f"""### 4. 最终结果
-{self.test_data.get('final_result', 'N/A')}
-
-## 错误信息
-"""
-        
-        if self.test_data.get('errors'):
-            for error in self.test_data['errors']:
-                report += f"- **{error['context']}**: {error['error']}\n"
-        else:
-            report += "无错误\n"
-        
-        report += f"""
-## 系统性能
-- **总执行时间**: {self.test_data.get('execution_time', 0):.2f}秒
-- **智能体生成时间**: 估计 {len(self.test_data.get('generated_agents', []))} * 2秒
-- **博弈轮次**: {len(self.test_data.get('game_rounds', []))}轮
-
-## 技术验证
-- ✅ 无枚举设计: 所有角色和响应均为动态生成
-- ✅ 需求方集成: 用户作为图中节点参与
-- ✅ LLM推理: 全流程基于智能推理
-- ✅ 闭环交互: 用户→需求方→执行者→需求方→用户
-
----
-*报告生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}*
-"""
-        
-        # 写入报告文件
-        with open(self.result_file, 'w', encoding='utf-8') as f:
-            f.write(report)
 
 class MockNagaConversation:
     """模拟NagaConversation（已弃用）"""
@@ -257,7 +82,12 @@ async def run_full_flow_test(user_question: str):
         # 4. 生成智能体团队
         test_logger.log_step("开始生成智能体团队")
         agents = await naga_system.generate_agents_only(task, (3, 5))
-        
+
+        if naga_system.role_generator.last_prompt_export_path:
+            prompt_path = str(naga_system.role_generator.last_prompt_export_path)
+            test_logger.test_data["prompt_export_file"] = prompt_path
+            test_logger.log_step("提示词已导出", {"file": prompt_path})
+
         # 记录生成的智能体
         test_logger.test_data["generated_agents"] = []
         for agent in agents:
@@ -356,7 +186,7 @@ async def run_full_flow_test(user_question: str):
             "agents_generated": len(agents),
             "domain": inferred_domain,
             "log_file": str(test_logger.log_file),
-            "report_file": str(test_logger.result_file)
+            "report_file": str(test_logger.report_file)
         }
     except Exception as e:
         test_logger.log_error(e, "全流程执行")
@@ -366,7 +196,7 @@ async def run_full_flow_test(user_question: str):
             "success": False,
             "error": str(e),
             "log_file": str(test_logger.log_file),
-            "report_file": str(test_logger.result_file)
+            "report_file": str(test_logger.report_file)
         }
 
 async def main():

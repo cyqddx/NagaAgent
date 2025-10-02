@@ -2,10 +2,11 @@
 NagaAgent Game 数据模型定义
 """
 
+from __future__ import annotations
+
 import time
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
-import torch
 
 
 @dataclass
@@ -90,50 +91,6 @@ class InteractionGraph:
             if agent.agent_id == agent_id:
                 return agent
         return None
-
-
-@dataclass
-class TextBlock:
-    """文本块数据模型 - 用于Philoss处理"""
-    content: str  # 文本内容
-    token_count: int  # token数量
-    block_index: int  # 块索引
-    timestamp: float = field(default_factory=time.time)
-    
-    def __post_init__(self):
-        if self.token_count <= 0:
-            # 粗略估算token数量（1个token ≈ 4个字符）
-            self.token_count = max(1, len(self.content) // 4)
-
-
-@dataclass  
-class HiddenState:
-    """隐藏状态数据模型 - Philoss使用"""
-    layer_index: int  # 层索引
-    state_vector: torch.Tensor  # 状态向量
-    timestamp: float = field(default_factory=time.time)
-    block_index: int = 0  # 对应的文本块索引
-    
-    def __post_init__(self):
-        if not isinstance(self.state_vector, torch.Tensor):
-            raise ValueError("state_vector必须是torch.Tensor类型")
-
-
-@dataclass
-class NoveltyScore:
-    """创新性评分数据模型"""
-    score: float  # 创新性得分 (0-1)
-    prediction_errors: List[float]  # 预测误差列表
-    analysis: str  # 分析报告
-    is_novel: bool  # 是否具有创新性
-    confidence: float = 0.0  # 置信度
-    
-    def __post_init__(self):
-        # 确保得分在合理范围内
-        self.score = max(0.0, min(1.0, self.score))
-        # 根据得分判断创新性（阈值0.6）
-        if self.is_novel is None:
-            self.is_novel = self.score >= 0.6
 
 
 @dataclass

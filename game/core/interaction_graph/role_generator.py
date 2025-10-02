@@ -4,7 +4,11 @@
 
 import asyncio
 import logging
+import zipfile
+from datetime import datetime
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
+from xml.sax.saxutils import escape
 from ..models.data_models import Agent, Task, ThinkingVector, GeneratedRole
 from ..models.config import GameConfig
 from .distributor import Distributor
@@ -27,6 +31,7 @@ class RoleGenerator:
         self.config = config
         self.distributor = Distributor(config, naga_conversation)
         self.prompt_generator = PromptGenerator(config, naga_conversation)
+        self.last_prompt_export_path: Optional[Path] = None
     
     async def generate_agents(self, task: Task, expected_count_range: Optional[Tuple[int, int]] = None) -> List[Agent]:
         """
@@ -64,6 +69,15 @@ class RoleGenerator:
             role_prompts = await self._generate_all_role_prompts(
                 generated_roles, task, collaboration_permissions
             )
+
+            # 记录提示词到xlsx
+            try:
+                self.last_prompt_export_path = self._save_prompts_to_xlsx(
+                    task, generated_roles, collaboration_permissions, role_prompts
+                )
+            except Exception as export_error:
+                logger.warning(f"角色提示词导出失败:{export_error}")
+                self.last_prompt_export_path = None
             
             # 步骤4:创建完整的Agent对象
             logger.info("步骤4:创建Agent对象")
@@ -154,7 +168,8 @@ class RoleGenerator:
                     thinking_vector=thinking_vector.get_current_context(),
                     system_prompt=system_prompt,
                     connection_permissions=connection_permissions,
-                    max_iterations=task.max_iterations
+                    max_iterations=task.max_iterations,
+                    priority_level=role.priority_level
                 )
                 
                 agents.append(agent)
@@ -165,6 +180,131 @@ class RoleGenerator:
                 continue
         
         return agents
+
+    def _save_prompts_to_xlsx(
+        self,
+        task: Task,
+        roles: List[GeneratedRole],
+        collaboration_permissions: Dict[str, List[str]],
+        role_prompts: Dict[str, str]
+    ) -> Optional[Path]:
+        """将每次生成的角色提示词保存为xlsx"""
+        output_dir = Path("logs/prompts")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_path = output_dir / f"{task.task_id}_{timestamp}.xlsx"
+        headers = [
+            "timestamp",
+            "task_id",
+            "task_domain",
+            "task_description",
+            "role_name",
+            "role_type",
+            "priority_level",
+            "connections",
+            "responsibilities",
+            "skills",
+            "system_prompt"
+        ]
+
+        now_iso = datetime.now().isoformat()
+        rows: List[List[str]] = []
+        for role in roles:
+            connections = collaboration_permissions.get(role.name, [])
+            prompt_text = role_prompts.get(role.name, "")
+            rows.append([
+                now_iso,
+                task.task_id,
+                task.domain,
+                task.description,
+                role.name,
+                role.role_type,
+                str(getattr(role, "priority_level", "")),
+                ", ".join(connections),
+                "\n".join(role.responsibilities),
+                "\n".join(role.skills),
+                prompt_text
+            ])
+
+        self._write_xlsx(file_path, headers, rows)
+        logger.info(f"角色提示词已保存: {file_path}")
+        return file_path
+
+    def _write_xlsx(self, file_path: Path, headers: List[str], rows: List[List[str]]):
+        """使用标准库构造简易xlsx文件，避免外部依赖"""
+        sheet_xml = self._build_sheet_xml(headers, rows)
+
+        content_types_xml = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
+            "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
+            "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+            "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
+            "<Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
+            "</Types>"
+        )
+
+        rels_xml = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>"
+            "</Relationships>"
+        )
+
+        workbook_xml = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
+            "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+            "<sheets><sheet name=\"role_prompts\" sheetId=\"1\" r:id=\"rId1\"/></sheets>"
+            "</workbook>"
+        )
+
+        workbook_rels_xml = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            "<Relationships xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>"
+            "</Relationships>"
+        )
+
+        with zipfile.ZipFile(file_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", content_types_xml)
+            zf.writestr("_rels/.rels", rels_xml)
+            zf.writestr("xl/workbook.xml", workbook_xml)
+            zf.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+            zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+
+    def _build_sheet_xml(self, headers: List[str], rows: List[List[str]]) -> str:
+        """构建工作表sheet1的XML内容"""
+        ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+        line_parts = [
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+            f"<worksheet xmlns=\"{ns}\">",
+            "<sheetData>"
+        ]
+
+        def column_name(index: int) -> str:
+            name = ""
+            while index >= 0:
+                name = chr(index % 26 + ord('A')) + name
+                index = index // 26 - 1
+            return name
+
+        all_rows = [headers] + rows
+        for row_idx, row_values in enumerate(all_rows, start=1):
+            line_parts.append(f"<row r=\"{row_idx}\">")
+            for col_idx, raw_value in enumerate(row_values):
+                cell_ref = f"{column_name(col_idx)}{row_idx}"
+                value = "" if raw_value is None else str(raw_value)
+                line_parts.append(
+                    f"<c r=\"{cell_ref}\" t=\"inlineStr\"><is><t>{escape(value)}</t></is></c>"
+                )
+            line_parts.append("</row>")
+
+        line_parts.append("</sheetData>")
+        line_parts.append("</worksheet>")
+        return "".join(line_parts)
     
     def _create_thinking_vector(self, role: GeneratedRole, task: Task) -> ThinkingVector:
         """创建思维向量"""
