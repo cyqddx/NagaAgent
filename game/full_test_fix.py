@@ -30,71 +30,65 @@ class PhaseResult:
     data: Dict[str, Any]
 
 
-class PhaseGate:
-    """Simple gatekeeper that lets us stop the pipeline at a given phase."""
-
-    def __init__(self, stop_after: Optional[str] = None) -> None:
-        self.stop_after = stop_after
-        self.completed: List[str] = []
-
-    def record(self, phase: str) -> None:
-        self.completed.append(phase)
-
-    def should_stop(self, phase: str) -> bool:
-        return self.stop_after == phase
-
-
 async def run_full_flow_test(
     user_question: str,
-    stop_after: Optional[str] = None,
+    max_phases: Optional[int] = None,
     expected_agent_count: Optional[tuple[int, int]] = None,
 ) -> Dict[str, Any]:
-    """Run the full flow with optional early exit after a given phase."""
+    """Run the full flow with an optional phase-count limit."""
 
-    gate = PhaseGate(stop_after=stop_after)
     logger = FullFlowTestLogger("动态全流程测试")
-    logger.log_step("测试开始", {"question": user_question, "stop_after": stop_after})
+    logger.log_step("测试开始", {"question": user_question, "max_phases": max_phases})
     logger.test_data["user_question"] = user_question
+
+    if max_phases is not None and max_phases <= 0:
+        max_phases = None
 
     try:
         phases: List[PhaseResult] = []
 
         # Phase 1: system init & config
-        config = await _phase_setup(logger, gate)
+        config = await _phase_setup(logger)
         phases.append(config)
-        if gate.should_stop("setup"):
-            return _finalize(logger, phases, success=True, reason="gate")
+        if max_phases is not None and len(phases) >= max_phases:
+            return _finalize(logger, phases, success=True, reason="phase_limit")
 
         # Phase 2: task bootstrapping (no domain inference)
-        task_phase = await _phase_prepare_task(logger, gate, user_question)
+        task_phase = await _phase_prepare_task(logger, user_question)
         task: Task = task_phase.data["task"]
         phases.append(task_phase)
-        if gate.should_stop("task"):
-            return _finalize(logger, phases, success=True, reason="gate")
+        if max_phases is not None and len(phases) >= max_phases:
+            return _finalize(logger, phases, success=True, reason="phase_limit")
 
         # Phase 3: agent generation
-        agents_phase = await _phase_generate_agents(logger, gate, task, expected_agent_count)
+        agents_phase = await _phase_generate_agents(logger, task, expected_agent_count)
         agents = agents_phase.data["agents"]
         phases.append(agents_phase)
-        if gate.should_stop("agents"):
-            return _finalize(logger, phases, success=True, reason="gate")
+        if max_phases is not None and len(phases) >= max_phases:
+            return _finalize(logger, phases, success=True, reason="phase_limit")
 
         # Phase 4: interaction graph
-        graph_phase = await _phase_build_graph(logger, gate, task, agents)
+        graph_phase = await _phase_build_graph(logger, task, agents)
         interaction_graph = graph_phase.data["interaction_graph"]
         phases.append(graph_phase)
-        if gate.should_stop("graph"):
-            return _finalize(logger, phases, success=True, reason="gate")
+        if max_phases is not None and len(phases) >= max_phases:
+            return _finalize(logger, phases, success=True, reason="phase_limit")
 
         # Phase 5: user request processing
-        response_phase = await _phase_process_request(logger, gate, task, interaction_graph, user_question)
+        response_phase = await _phase_process_request(logger, task, interaction_graph, user_question)
         response = response_phase.data["response"]
         phases.append(response_phase)
-        if gate.should_stop("response"):
-            return _finalize(logger, phases, success=True, reason="gate", extra={"result": response.content})
+        if max_phases is not None and len(phases) >= max_phases:
+            return _finalize(
+                logger,
+                phases,
+                success=True,
+                reason="phase_limit",
+                extra={"result": response.content},
+            )
 
         # Phase 6: self game session
-        game_phase = await _phase_self_game(logger, gate, task, agents)
+        game_phase = await _phase_self_game(logger, task, agents)
         session = game_phase.data["session"]
         phases.append(game_phase)
 
@@ -114,7 +108,7 @@ async def run_full_flow_test(
         return _finalize(logger, phases, success=False, extra={"error": str(exc)})
 
 
-async def _phase_setup(logger: FullFlowTestLogger, gate: PhaseGate) -> PhaseResult:
+async def _phase_setup(logger: FullFlowTestLogger) -> PhaseResult:
     logger.log_step("系统初始化")
     config_path = PROJECT_PARENT / "config.json"
     config_data: Dict[str, Any]
@@ -131,7 +125,6 @@ async def _phase_setup(logger: FullFlowTestLogger, gate: PhaseGate) -> PhaseResu
     logger.test_data["config"] = {"loaded": bool(config_data)}
     logger._game_config = game_config  # type: ignore[attr-defined]
     logger._naga_system = naga_system  # type: ignore[attr-defined]
-    gate.record("setup")
     return PhaseResult(
         name="setup",
         data={"config": config_data, "game_config": game_config, "naga_system": naga_system},
@@ -140,7 +133,6 @@ async def _phase_setup(logger: FullFlowTestLogger, gate: PhaseGate) -> PhaseResu
 
 async def _phase_prepare_task(
     logger: FullFlowTestLogger,
-    gate: PhaseGate,
     user_question: str,
 ) -> PhaseResult:
     logger.log_step("创建任务对象")
@@ -152,13 +144,11 @@ async def _phase_prepare_task(
         constraints=[],
     )
     logger.test_data["task"] = {"task_id": task.task_id, "description": task.description}
-    gate.record("task")
     return PhaseResult("task", {"task": task})
 
 
 async def _phase_generate_agents(
     logger: FullFlowTestLogger,
-    gate: PhaseGate,
     task: Task,
     expected_agent_count: Optional[tuple[int, int]],
 ) -> PhaseResult:
@@ -180,13 +170,11 @@ async def _phase_generate_agents(
         logger.log_node_output(agent.name, "需求方" if agent.is_requester else "执行者", agent.role)
 
     logger.test_data["generated_agents"] = agent_summaries
-    gate.record("agents")
     return PhaseResult("agents", {"agents": agents})
 
 
 async def _phase_build_graph(
     logger: FullFlowTestLogger,
-    gate: PhaseGate,
     task: Task,
     agents: List[Any],
 ) -> PhaseResult:
@@ -197,13 +185,11 @@ async def _phase_build_graph(
         "agent_count": len(interaction_graph.agents),
         "connections": sum(len(agent.connection_permissions) for agent in interaction_graph.agents),
     }
-    gate.record("graph")
     return PhaseResult("graph", {"interaction_graph": interaction_graph})
 
 
 async def _phase_process_request(
     logger: FullFlowTestLogger,
-    gate: PhaseGate,
     task: Task,
     interaction_graph: Any,
     user_question: str,
@@ -217,13 +203,11 @@ async def _phase_process_request(
     )
     logger.log_node_output("系统", "响应", response.content)
     logger.test_data["final_result"] = response.content
-    gate.record("response")
     return PhaseResult("response", {"response": response})
 
 
 async def _phase_self_game(
     logger: FullFlowTestLogger,
-    gate: PhaseGate,
     task: Task,
     agents: List[Any],
 ) -> PhaseResult:
@@ -234,7 +218,6 @@ async def _phase_self_game(
     logger.test_data["game_rounds"] = _summarize_rounds(session.rounds)
     if session.final_result and session.final_result.actor_output:
         logger.test_data["final_result"] = session.final_result.actor_output.content
-    gate.record("self_game")
     return PhaseResult("self_game", {"session": session})
 
 
@@ -294,8 +277,13 @@ async def main() -> None:
     if not question:
         question = "我想创建一个帮助学生学习编程的智能平台"
 
-    stop_after = input("可选：输入阶段名以提前结束 (setup/task/agents/graph/response): ").strip() or None
-    result = await run_full_flow_test(question, stop_after=stop_after)
+    phase_limit_input = input("可选：输入要执行的阶段数量 (1-6) 以提前结束: ").strip()
+    if phase_limit_input.isdigit():
+        max_phase_value = int(phase_limit_input)
+        max_phases = max_phase_value if max_phase_value > 0 else None
+    else:
+        max_phases = None
+    result = await run_full_flow_test(question, max_phases=max_phases)
 
     print("\n结果:")
     print(json.dumps(result, ensure_ascii=False, indent=2))
