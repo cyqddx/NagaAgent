@@ -6,7 +6,6 @@ Distributor - 角色分配器
 import asyncio
 import json
 import logging
-import re
 from typing import List, Dict, Any, Optional, Tuple
 
 from ..models.data_models import Task, RoleGenerationRequest, GeneratedRole
@@ -88,7 +87,7 @@ class Distributor:
         except Exception as e:
             logger.warning(f"角色生成失败，启用本地降级方案: {e}")
 
-        return self._heuristic_generate_roles(task, expected_count_range)
+        return self._fallback_generate_roles(task, expected_count_range)
     
     def _build_role_generation_prompt(self, request: RoleGenerationRequest) -> str:
         """构建角色生成的系统提示词"""
@@ -276,7 +275,7 @@ class Distributor:
         except Exception as e:
             logger.warning(f"权限分配失败，启用本地降级方案: {e}")
 
-        return self._heuristic_assign_permissions(roles)
+        return self._fallback_assign_permissions(roles)
     
     def _build_permission_assignment_prompt(self, roles: List[GeneratedRole]) -> str:
         """构建权限分配提示词"""
@@ -352,125 +351,4 @@ class Distributor:
         except Exception as e:
             logger.error(f"权限解析失败:{e}")
             raise
-
-    # --- LLM unavailable helpers -----------------------------------------
-
-    def _heuristic_generate_roles(self, task: Task, expected_count_range: Tuple[int, int]) -> List[GeneratedRole]:
-        """无API时的轻量角色生成,完全基于任务语义"""
-        min_count, max_count = expected_count_range
-        min_count = max(1, min_count)
-        focus_points = self._extract_focus_points(task)
-        if not focus_points:
-            focus_points = [task.description or task.domain or "核心目标"]
-
-        candidate = len(focus_points) or min_count
-        target_count = min(max_count, max(min_count, candidate))
-        roles: List[GeneratedRole] = []
-
-        for idx in range(target_count):
-            topic = focus_points[idx % len(focus_points)]
-            topic_compact = topic.replace("\n", " ").strip()
-            if len(topic_compact) > 40:
-                topic_compact = topic_compact[:37] + "..."
-
-            name = f"{self._headline_from_topic(topic_compact)}协作负责人"
-            responsibilities = self._build_responsibilities(topic_compact)
-            skills = self._build_skills(topic_compact)
-            output_requirements = f"形成围绕\"{topic_compact}\"的阶段性输出与交付说明"
-            priority_level = max(1, 9 - idx)
-
-            roles.append(
-                GeneratedRole(
-                    name=name,
-                    role_type=f"围绕{topic_compact}的协作角色",
-                    responsibilities=responsibilities,
-                    skills=skills,
-                    output_requirements=output_requirements,
-                    priority_level=priority_level,
-                )
-            )
-
-        logger.info("NagaAgent API缺失, 已基于任务语义生成 %d 个角色", len(roles))
-        return roles
-
-    def _extract_focus_points(self, task: Task) -> List[str]:
-        """从任务字段提取关注点"""
-        raw_segments: List[str] = []
-        for source in (task.requirements or []):
-            raw_segments.extend(self._split_segments(source))
-        if task.description:
-            raw_segments.extend(self._split_segments(task.description))
-        for constraint in task.constraints or []:
-            raw_segments.extend(self._split_segments(constraint))
-
-        normalised: List[str] = []
-        seen: set[str] = set()
-        for segment in raw_segments:
-            cleaned = segment.strip()
-            if not cleaned:
-                continue
-            if cleaned in seen:
-                continue
-            seen.add(cleaned)
-            normalised.append(cleaned)
-        return normalised[:6]
-
-    def _split_segments(self, text: str) -> List[str]:
-        return [part.strip() for part in re.split(r"[。！？；.;,、\n]", text) if part.strip()]
-
-    def _headline_from_topic(self, topic: str) -> str:
-        tokens = re.findall(r"[\w一-龥]+", topic)
-        if not tokens:
-            return "核心任务"
-        return tokens[0][:6]
-
-    def _build_responsibilities(self, topic: str) -> List[str]:
-        base = [
-            f"拆解并澄清与\"{topic}\"相关的目标",
-            f"组织协同确保{topic}按计划推进",
-            f"整合{topic}过程中的关键输出并复核质量",
-        ]
-        return base
-
-    def _build_skills(self, topic: str) -> List[str]:
-        anchor = self._headline_from_topic(topic)
-        return [
-            f"{anchor}方案设计",
-            "需求拆解能力",
-            "跨职能沟通",
-            "风险识别与缓解",
-        ]
-
-    def _heuristic_assign_permissions(self, roles: List[GeneratedRole]) -> Dict[str, List[str]]:
-        """无API时生成基础协作关系"""
-        if not roles:
-            return {}
-
-        ordered = sorted(roles, key=lambda r: r.priority_level, reverse=True)
-        leader = ordered[0].name
-        permissions: Dict[str, List[str]] = {}
-
-        for idx, role in enumerate(ordered):
-            connections: List[str] = []
-            if idx == 0:
-                connections = [peer.name for peer in ordered[1:]]
-            else:
-                connections.append(leader)
-                if idx - 1 >= 0:
-                    connections.append(ordered[idx - 1].name)
-                if idx + 1 < len(ordered):
-                    connections.append(ordered[idx + 1].name)
-
-            # 去重并移除自身
-            clean = []
-            seen: set[str] = set()
-            for conn in connections:
-                if conn == role.name or conn in seen:
-                    continue
-                seen.add(conn)
-                clean.append(conn)
-            permissions[role.name] = clean
-
-        logger.info("NagaAgent API缺失, 已基于优先级生成协作权限")
-        return permissions
     
